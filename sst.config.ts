@@ -5,6 +5,11 @@ const HOSTED_ZONES = {
   prod: "Z00675953HJM3LQ4W0ECR",
 };
 
+const PROFILES = {
+  dev: "vagancia-project-dev",
+  prod: "vagancia-project-prod",
+};
+
 function getHostedZone(stage: string): string {
   if (stage === "prod") return HOSTED_ZONES.prod;
 
@@ -14,17 +19,14 @@ function getHostedZone(stage: string): string {
 export default $config({
   app(input) {
     return {
-      name: "convex-test",
+      name: "convex-test", // ‼️ this must be unique and cannot be shared with other apps, can mess the whole infrastructure
       removal: input?.stage === "prod" ? "retain" : "remove",
       protect: ["prod"].includes(input?.stage),
       home: "aws",
       providers: {
         aws: {
           region: "us-east-2",
-          profile:
-            input.stage === "prod"
-              ? "vagancia-project-prod"
-              : "vagancia-project-dev",
+          profile: input.stage === "prod" ? PROFILES.prod : PROFILES.dev,
         },
       },
     };
@@ -35,15 +37,15 @@ export default $config({
         ? `${$app.name}.prod.app.vaganzia.com`
         : `${$app.stage}.${$app.name}.dev.app.vaganzia.com`;
 
+    const dns = sst.aws.dns({
+      zone: getHostedZone($app.stage),
+    });
+
     const router = new sst.aws.Router("MyRouter", {
       domain: {
         name: stageDomain,
         aliases: [`*.${stageDomain}`],
-        dns: sst.aws.dns({
-          zone: getHostedZone($app.stage),
-        }),
-        // dns: false,
-        // cert: "arn:aws:acm:us-east-1:221723376890:certificate/42c37a20-829c-4843-a85f-cd28597bfb8c",
+        dns,
       },
     });
 
@@ -54,18 +56,17 @@ export default $config({
 
     const database = new sst.aws.Mysql("Database", {
       vpc,
-      database: "convex_self_hosted",
+      // database: "convex_self_hosted",
+      database: "instanceName",
       dev: {
-        database: "convex_self_hosted",
+        // database: "convex_self_hosted",
+        database: "instanceName",
         host: "localhost",
         port: 3306,
         username: "root",
         password: "root",
       },
     });
-
-    // const baseDomain = "convex-self-hosted.dev.conkoa.ai";
-    // const domain = $dev ? `${$app.stage}.${baseDomain}` : baseDomain;
 
     const exportsBucket = new sst.aws.Bucket("ExportsBucket", {});
     const snapshotImportsBucket = new sst.aws.Bucket(
@@ -124,8 +125,7 @@ export default $config({
 
     const convex = new sst.aws.Service("Convex", {
       cluster,
-      image:
-        "ghcr.io/get-convex/convex-backend:5143fec81f146ca67495c12c6b7a15c5802c37e2",
+      image: "ghcr.io/get-convex/convex-backend:latest",
       cpu: "0.5 vCPU",
       memory: "1 GB",
       scaling: {
@@ -150,16 +150,9 @@ export default $config({
       },
       loadBalancer: {
         domain: {
-          // name: domain,
-          // aliases: [`api.${domain}`],
-          // dns: sst.aws.dns(),
-          name: `api.${stageDomain}`,
-          aliases: [],
-          dns: sst.aws.dns({
-            zone: getHostedZone($app.stage),
-          }),
-          // dns: false,
-          // cert: "arn:aws:acm:us-east-1:221723376890:certificate/42c37a20-829c-4843-a85f-cd28597bfb8c",
+          name: `convex.${stageDomain}`,
+          aliases: [`api.convex.${stageDomain}`],
+          dns,
         },
         health: {
           "3210/http": {
@@ -167,24 +160,18 @@ export default $config({
             interval: "1 minute",
             timeout: "10 seconds",
           },
-          "3211/http": {
-            path: "/version",
-            interval: "1 minute",
-            timeout: "10 seconds",
-          },
         },
         rules: [
           {
-            listen: "3210/https",
+            listen: "443/https",
             forward: "3210/http",
-          },
-          {
-            listen: "3211/https",
-            forward: "3211/http",
           },
         ],
       },
       environment: {
+        INSTANCE_NAME: "instanceName",
+        INSTANCE_SECRET:
+          "637837f21466495283aad0c09692efa07cd439aced03ce051e1abaa35375a0ef",
         S3_STORAGE_EXPORTS_BUCKET: exportsBucket.name,
         S3_STORAGE_SNAPSHOT_IMPORTS_BUCKET: snapshotImportsBucket.name,
         S3_STORAGE_MODULES_BUCKET: modulesBucket.name,
@@ -201,13 +188,11 @@ export default $config({
             }
           : {
               MYSQL_URL: $interpolate`mysql://${database.username}:${database.password}@${database.host}:${database.port}`,
-              // CONVEX_CLOUD_ORIGIN: $interpolate`https://${domain}:3210`,
-              // CONVEX_SITE_ORIGIN: $interpolate`https://${domain}:3211`,
-              CONVEX_CLOUD_ORIGIN: router.url.apply((url) => `${url}:3210`),
-              CONVEX_SITE_ORIGIN: router.url.apply((url) => `${url}:3211`),
+              CONVEX_CLOUD_ORIGIN: $interpolate`https://api.convex.${stageDomain}`,
+              CONVEX_SITE_ORIGIN: $interpolate`https://convex.${stageDomain}`,
               DO_NOT_REQUIRE_SSL: "true",
-              AWS_ACCESS_KEY_ID: convexUserAccessKey.id,
-              AWS_SECRET_ACCESS_KEY: convexUserAccessKey.secret,
+              // AWS_ACCESS_KEY_ID: convexUserAccessKey.id,
+              // AWS_SECRET_ACCESS_KEY: convexUserAccessKey.secret,
             }),
       },
       dev: {
@@ -219,21 +204,16 @@ export default $config({
           enableExecuteCommand: true,
         },
       },
+      wait: true,
     });
 
     const dashboard = new sst.aws.Service("Dashboard", {
       cluster,
-      image:
-        "ghcr.io/get-convex/convex-dashboard:5143fec81f146ca67495c12c6b7a15c5802c37e2",
-      // environment: {
-      //   NEXT_PUBLIC_DEPLOYMENT_URL: $dev
-      //     ? "http://127.0.0.1:3210"
-      //     : $interpolate`${router.url}:3210`,
-      // },
+      image: "ghcr.io/get-convex/convex-dashboard:latest",
       environment: {
         NEXT_PUBLIC_DEPLOYMENT_URL: $dev
           ? "http://127.0.0.1:3210"
-          : router.url.apply((url) => `${url}:3210`),
+          : $interpolate`https://api.convex.${stageDomain}`,
       },
       link: [convex],
       dev: {
@@ -252,9 +232,7 @@ export default $config({
         vpc,
         domain: {
           name: `dashboard.${stageDomain}`,
-          dns: sst.aws.dns({
-            zone: getHostedZone($app.stage),
-          }),
+          dns,
         },
       });
       api.routePrivate("$default", dashboard.nodes.cloudmapService.arn);
@@ -278,14 +256,39 @@ export default $config({
       environment: {
         VITE_CONVEX_URL: $dev
           ? "http://127.0.0.1:3210"
-          : router.url.apply((url) => `${url}:3210`),
+          : $interpolate`https://api.convex.${stageDomain}`,
       },
       domain: {
         name: `static.${stageDomain}`,
-        dns: sst.aws.dns({
-          zone: getHostedZone($app.stage),
-        }),
+        dns,
       },
     });
+
+    if (!$dev) {
+      // Output the Cluster and Service Names so you can find the task
+      $resolve([cluster.nodes.cluster.name, convex.nodes.service.name]).apply(
+        async ([clusterName, serviceName]) => {
+          console.log("\n\x1b[32m--- ECS INFO ---\x1b[0m");
+          console.log("Cluster Name:", clusterName);
+          console.log("Service Name:", serviceName);
+
+          console.log("\x1b[33mTo get the Task ID run:\x1b[0m");
+          console.log(
+            `aws ecs list-tasks --cluster ${clusterName} --service-name ${serviceName} --profile ${$app.stage === "prod" ? PROFILES.prod : PROFILES.dev}`,
+          );
+          console.log("\x1b[32m----------------\x1b[0m\n");
+
+          const scripts = await import("./infra/scripts");
+
+          const { runGenerateAdminKey, waitForService } = scripts.default(
+            $app.stage === "prod" ? PROFILES.prod : PROFILES.dev,
+          );
+
+          const task = await waitForService(clusterName, serviceName);
+
+          await runGenerateAdminKey(clusterName, serviceName, task);
+        },
+      );
+    }
   },
 });

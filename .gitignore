@@ -27,3 +27,7 @@ dist-ssr
 .sst
 
 convex/_generated
+
+# env variables
+.env.dev
+.env.prod
