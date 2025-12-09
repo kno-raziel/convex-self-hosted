@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite",
+    "dev": "docker compose -f ./docker/docker-compose-database.yml up -d && sst dev ",
+    "dev:vite": "vite",
     "lint": "eslint .",
     "preview": "vite preview"
   },
